@@ -4,6 +4,9 @@ import cv2
 import numpy as np
 
 
+DIRECTIONS = ((-1, 0), (0, -1), (1, 0), (0, 1))
+
+
 def get_board_image(screenshot_file=None):
 	if screenshot_file is None:
 		adb = "./platform-tools/adb"
@@ -122,17 +125,163 @@ def ocr(patch):
 
 
 def digitise(image, rows, columns):
+	grid = image_to_patches(image, rows, columns)
+	for y in range(len(grid)):
+		for x in range(len(grid[0])):
+			grid[y][x] = ocr(grid[y][x])
+	board = Board(grid)
+	return board
 
-	patch_grid = image_to_patches(image, rows, columns)
-	for row in patch_grid:
-		for patch in row:
-			value = ocr(patch)
-			print(value)
-			if patch is not None:
-				cv2.imshow("window", patch)
-				cv2.waitKey(0)
+
+class Board:
+	def __init__(self, values):
+		self.height = len(values)
+		self.width = len(values[0])
+		self._build(values)
+
+	def _build(self, values):
+		self.grid = []
+		for y, row in enumerate(values):
+			out = []
+			for x, value in enumerate(row):
+				out.append(Space() if value is None else Node(value))
+			self.grid.append(out)
+
+	def run(self):
+		for y, row in enumerate(self.grid):
+			for x, cell in enumerate(row):
+				if isinstance(cell, Node):
+					self._run_node(y, x)
 
 			
+
+	def _run_node(self, y, x):
+		for dir_y, dir_x in DIRECTIONS:
+			node = self._get_node_in_direction(y, x, dir_y, dir_x)
+			if node is None:
+				continue
+			if self.grid[y][x].slots[(dir_y, dir_x)] and node.slots[(dir_y, dir_x)]:
+				self._create_bridge(y, x, dir_y, dir_x)
+
+	def _get_node_in_direction(self, y, x, dir_y, dir_x):
+		while 1:
+			y += dir_y
+			x += dir_x
+			if (y, x) not in self:
+				return None
+			square = self.grid[y][x]
+			if isinstance(square, Bridge):
+				if square.orthogonal_to(dir_y, dir_x):
+					return None
+				continue
+			elif isinstance(square, Space):
+				continue
+			return square
+
+	def _create_bridge(self, y, x, dir_y, dir_x):
+		self.grid[y][x].connect((dir_y, dir_x))
+
+		while 1:
+			y += dir_y
+			x += dir_x
+			if (y, x) not in self:
+				return
+			square = self.grid[y][x]
+
+			if isinstance(square, Bridge):
+				assert(
+					abs(dir_y) == square.dir_y and 
+					abs(dir_x) == square.dir_x and 
+					square.weight == 1
+				)
+				square.weight = 2
+				continue
+
+			if isinstance(square, Space):
+				self.grid[y][x] = Bridge(dir_y, dir_x)
+				continue
+
+			# Otherwise, reached opposite Node
+			square.connect((-dir_y, -dir_x))
+			return
+
+
+	def __contains__(self, d):
+		return 0 <= d[0] < self.height and 0 <= d[1] < self.width
+
+	def draw(self):
+		rad = 40
+		h, w = rad * self.height, rad * self.width
+		canvas = np.ones((h, w), dtype=np.uint8) * 255
+
+		font = cv2.FONT_HERSHEY_SIMPLEX
+
+		for y_i, row in enumerate(self.grid):
+			for x_i, item in enumerate(row):
+				y = int((y_i + 0.5) * rad)
+				x = int((x_i + 0.5) * rad)
+
+				if isinstance(item, Space):
+					continue
+				elif isinstance(item, Node):
+					canvas = cv2.circle(canvas, (x, y), int(rad / 2.2), 0, 2)
+					canvas = cv2.putText(canvas, str(item), (x-10, y+10), font, 1, 0, 2)
+					continue
+
+				# Otherwise, Bridge
+				for i in range(item.weight):
+					offset = 3 * (2 * i - 1) * (item.weight - 1)
+					start_x = x - 0.5 * item.dir_x * rad + offset * item.dir_y
+					start_y = y - 0.5 * item.dir_y * rad + offset * item.dir_x
+					start = (int(start_x), int(start_y))
+					end = (int(start[0] + item.dir_x * rad), int(start[1] + item.dir_y * rad))
+					canvas = cv2.line(canvas, start, end, 0, 2)
+
+		cv2.imshow("board", canvas)
+		cv2.waitKey(0)
+
+
+class Space:
+
+	def __init__(self):
+		self.weight = 1
+
+	def __repr__(self):
+		return '0'
+
+
+class Node:
+
+	def __init__(self, clue):
+		self.clue = clue
+		self.remaining = clue
+		self.slots = dict((k, min(2, clue)) for k in DIRECTIONS)
+
+	def __repr__(self):
+		return f'{self.clue}'
+
+	def connect(self, direction):
+		assert(self.remaining and self.slots[direction])
+		self.slots[direction] -= 1
+		self.remaining -= 1
+		for d in DIRECTIONS:
+			self.slots[d] = min(self.slots[d], self.remaining)
+
+
+
+class Bridge:
+
+	def __init__(self, dir_y, dir_x):
+		self.dir_y = int(bool(dir_y))
+		self.dir_x = int(bool(dir_x))
+		self.weight = 1
+
+	def __repr__(self):
+		return f'E'
+
+	def orthogonal_to(self, dy, dx):
+		return not (self.dir_y * dy + self.dir_x * dx)
+
 
 # create_number_references([
 # 	("10x7_2400-1080.npy", 10, 7),
@@ -141,9 +290,10 @@ def digitise(image, rows, columns):
 # 	("14x10_2400-1080.npy", 14, 10),
 # ])
 
-board = get_board_image("14x10_2400-1080.npy")
-cv2.imshow("board", cv2.resize(board, (540, 700)))
-digitise(board, rows=14, columns=10)
-# show(board)
+board_pixels = get_board_image("14x10_2400-1080.npy")
+cv2.imshow("original", cv2.resize(board_pixels, (540, 700)))
+board = digitise(board_pixels, rows=14, columns=10)
+board.run()
+board.draw()
 
 
