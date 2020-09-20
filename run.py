@@ -1,10 +1,20 @@
+from collections import namedtuple
 import subprocess
 
 import cv2
 import numpy as np
 
 
-DIRECTIONS = ((-1, 0), (0, -1), (1, 0), (0, 1))
+Direction = namedtuple("Direction", ["y", "x"])
+
+DIRECTIONS = (Direction(-1, 0), Direction(0, -1), Direction(1, 0), Direction(0, 1))
+
+def neg(direction):
+	return Direction(-direction.y, -direction.x)
+
+def orthogonal(d1, d2):
+	return not (d1.y * d2.y + d1.x * d2.x)
+
 
 
 def get_board_image(screenshot_file=None):
@@ -147,67 +157,86 @@ class Board:
 				out.append(Space() if value is None else Node(value))
 			self.grid.append(out)
 
-	def run(self):
+	def solve(self):
+		while self._simple_pass():
+			pass
+
+	def _simple_pass(self):
+		new_bridge = False
 		for y, row in enumerate(self.grid):
 			for x, cell in enumerate(row):
 				if isinstance(cell, Node):
-					self._run_node(y, x)
+					new_bridge |= self._simple_pass_node(y, x)
+		return new_bridge
 
-			
+	def _simple_pass_node(self, y, x):
+		node = self.grid[y][x]
+		if node.remaining == 0:
+			return False
 
-	def _run_node(self, y, x):
-		for dir_y, dir_x in DIRECTIONS:
-			node = self._get_node_in_direction(y, x, dir_y, dir_x)
-			if node is None:
+		possible_ds = []
+		total_slots = 0
+		for d in DIRECTIONS:
+			neighbour = self._get_node_in_direction(y, x, d)
+			if neighbour is None:
 				continue
-			if self.grid[y][x].slots[(dir_y, dir_x)] and node.slots[(dir_y, dir_x)]:
-				self._create_bridge(y, x, dir_y, dir_x)
+			possible_ds.append(d)
+			node.slots[d] = min(node.slots[d], neighbour.slots[neg(d)])
+			total_slots += node.slots[d]
 
-	def _get_node_in_direction(self, y, x, dir_y, dir_x):
+		new_bridge = False
+		for d in possible_ds:
+			if total_slots - node.slots[d] < node.remaining:
+				self._create_bridge(y, x, d)
+				new_bridge = True
+
+		return new_bridge
+
+	def _get_node_in_direction(self, y, x, d):
 		while 1:
-			y += dir_y
-			x += dir_x
+			y += d.y
+			x += d.x
 			if (y, x) not in self:
 				return None
 			square = self.grid[y][x]
 			if isinstance(square, Bridge):
-				if square.orthogonal_to(dir_y, dir_x):
+				if orthogonal(square.d, d):
 					return None
 				continue
 			elif isinstance(square, Space):
 				continue
 			return square
 
-	def _create_bridge(self, y, x, dir_y, dir_x):
-		self.grid[y][x].connect((dir_y, dir_x))
+	def _create_bridge(self, y, x, d):
+		self.grid[y][x].connect(d)
 
 		while 1:
-			y += dir_y
-			x += dir_x
+			y += d.y
+			x += d.x
 			if (y, x) not in self:
 				return
 			square = self.grid[y][x]
 
 			if isinstance(square, Bridge):
 				assert(
-					abs(dir_y) == square.dir_y and 
-					abs(dir_x) == square.dir_x and 
+					abs(d.y) == square.d.y and 
+					abs(d.x) == square.d.x and 
 					square.weight == 1
 				)
 				square.weight = 2
 				continue
 
 			if isinstance(square, Space):
-				self.grid[y][x] = Bridge(dir_y, dir_x)
+				self.grid[y][x] = Bridge(d)
 				continue
 
 			# Otherwise, reached opposite Node
-			square.connect((-dir_y, -dir_x))
+			square.connect(neg(d))
 			return
 
 
-	def __contains__(self, d):
-		return 0 <= d[0] < self.height and 0 <= d[1] < self.width
+	def __contains__(self, point):
+		return 0 <= point[0] < self.height and 0 <= point[1] < self.width
 
 	def draw(self):
 		rad = 40
@@ -231,10 +260,10 @@ class Board:
 				# Otherwise, Bridge
 				for i in range(item.weight):
 					offset = 3 * (2 * i - 1) * (item.weight - 1)
-					start_x = x - 0.5 * item.dir_x * rad + offset * item.dir_y
-					start_y = y - 0.5 * item.dir_y * rad + offset * item.dir_x
+					start_x = x - 0.5 * item.d.x * rad + offset * item.d.y
+					start_y = y - 0.5 * item.d.y * rad + offset * item.d.x
 					start = (int(start_x), int(start_y))
-					end = (int(start[0] + item.dir_x * rad), int(start[1] + item.dir_y * rad))
+					end = (int(start[0] + item.d.x * rad), int(start[1] + item.d.y * rad))
 					canvas = cv2.line(canvas, start, end, 0, 2)
 
 		cv2.imshow("board", canvas)
@@ -260,27 +289,23 @@ class Node:
 	def __repr__(self):
 		return f'{self.clue}'
 
-	def connect(self, direction):
-		assert(self.remaining and self.slots[direction])
-		self.slots[direction] -= 1
+	def connect(self, d):
+		assert(self.remaining and self.slots[d])
+		self.slots[d] -= 1
 		self.remaining -= 1
-		for d in DIRECTIONS:
-			self.slots[d] = min(self.slots[d], self.remaining)
+		for _d in DIRECTIONS:
+			self.slots[_d] = min(self.slots[_d], self.remaining)
 
 
 
 class Bridge:
 
-	def __init__(self, dir_y, dir_x):
-		self.dir_y = int(bool(dir_y))
-		self.dir_x = int(bool(dir_x))
+	def __init__(self, d):
+		self.d = Direction(int(bool(d.y)), int(bool(d.x)))
 		self.weight = 1
 
 	def __repr__(self):
 		return f'E'
-
-	def orthogonal_to(self, dy, dx):
-		return not (self.dir_y * dy + self.dir_x * dx)
 
 
 # create_number_references([
@@ -290,10 +315,10 @@ class Bridge:
 # 	("14x10_2400-1080.npy", 14, 10),
 # ])
 
-board_pixels = get_board_image("14x10_2400-1080.npy")
+board_pixels = get_board_image("10x7_2400-1080.npy")
 cv2.imshow("original", cv2.resize(board_pixels, (540, 700)))
-board = digitise(board_pixels, rows=14, columns=10)
-board.run()
+board = digitise(board_pixels, rows=10, columns=7)
+board.solve()
 board.draw()
 
 
