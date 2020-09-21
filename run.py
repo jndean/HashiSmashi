@@ -143,6 +143,10 @@ def digitise(image, rows, columns):
 	return board
 
 
+class Contradiction(RuntimeError):
+	pass
+
+
 class Board:
 	def __init__(self, values):
 		self.height = len(values)
@@ -151,48 +155,25 @@ class Board:
 
 	def _build(self, values):
 		self.grid = []
+		self.clusters = set()
 		for y, row in enumerate(values):
 			out = []
 			for x, value in enumerate(row):
-				out.append(Space() if value is None else Node(value))
+				if value is None:
+					out.append(Space())
+				else:
+					node = Node(value)
+					self.clusters.add(node.cluster)
+					out.append(node)
 			self.grid.append(out)
-
-	def solve(self):
-		while self._simple_pass():
-			pass
-
-	def _simple_pass(self):
-		new_bridge = False
+		
+	def get_unfinished_nodes(self):
 		for y, row in enumerate(self.grid):
 			for x, cell in enumerate(row):
-				if isinstance(cell, Node):
-					new_bridge |= self._simple_pass_node(y, x)
-		return new_bridge
+				if isinstance(cell, Node) and cell.remaining > 0:
+					yield y, x, cell
 
-	def _simple_pass_node(self, y, x):
-		node = self.grid[y][x]
-		if node.remaining == 0:
-			return False
-
-		possible_ds = []
-		total_slots = 0
-		for d in DIRECTIONS:
-			neighbour = self._get_node_in_direction(y, x, d)
-			if neighbour is None:
-				continue
-			possible_ds.append(d)
-			node.slots[d] = min(node.slots[d], neighbour.slots[neg(d)])
-			total_slots += node.slots[d]
-
-		new_bridge = False
-		for d in possible_ds:
-			if total_slots - node.slots[d] < node.remaining:
-				self._create_bridge(y, x, d)
-				new_bridge = True
-
-		return new_bridge
-
-	def _get_node_in_direction(self, y, x, d):
+	def get_node_in_direction(self, y, x, d):
 		while 1:
 			y += d.y
 			x += d.x
@@ -207,9 +188,10 @@ class Board:
 				continue
 			return square
 
-	def _create_bridge(self, y, x, d):
-		self.grid[y][x].connect(d)
+	def create_bridge(self, y, x, d):
+		node = self.grid[y][x]
 
+		# Find the other node
 		while 1:
 			y += d.y
 			x += d.x
@@ -230,13 +212,37 @@ class Board:
 				self.grid[y][x] = Bridge(d)
 				continue
 
-			# Otherwise, reached opposite Node
-			square.connect(neg(d))
-			return
+			other_node = square
+			break
 
+		# Join the nodes with a bridge
+		node.connect(d)
+		other_node.connect(neg(d))
+
+		# Update the clusters
+		if node.cluster is not other_node.cluster:
+			self.clusters.remove(other_node.cluster)
+			node.cluster.consume(other_node.cluster)
+
+		# Check for contradictions
+		d_sum, other_d_sum = 0, 0
+		for d in DIRECTIONS:
+			d_sum += node.slots[d]
+			other_d_sum += other_node.slots[d]
+		if (d_sum < node.remaining or 
+			other_d_sum < other_node.remaining or
+			(node.cluster.remaining == 0 and len(self.clusters) > 1)
+		):
+			raise Contradiction()
 
 	def __contains__(self, point):
 		return 0 <= point[0] < self.height and 0 <= point[1] < self.width
+
+	def is_solved(self):
+		return len(self.clusters) == 1 and next(iter(self.clusters)).remaining == 0
+
+	def copy():
+		pass
 
 	def draw(self):
 		rad = 40
@@ -272,9 +278,6 @@ class Board:
 
 class Space:
 
-	def __init__(self):
-		self.weight = 1
-
 	def __repr__(self):
 		return '0'
 
@@ -285,6 +288,7 @@ class Node:
 		self.clue = clue
 		self.remaining = clue
 		self.slots = dict((k, min(2, clue)) for k in DIRECTIONS)
+		self.cluster = Cluster(self)
 
 	def __repr__(self):
 		return f'{self.clue}'
@@ -293,9 +297,9 @@ class Node:
 		assert(self.remaining and self.slots[d])
 		self.slots[d] -= 1
 		self.remaining -= 1
+		self.cluster.remaining -= 1
 		for _d in DIRECTIONS:
 			self.slots[_d] = min(self.slots[_d], self.remaining)
-
 
 
 class Bridge:
@@ -304,9 +308,61 @@ class Bridge:
 		self.d = Direction(int(bool(d.y)), int(bool(d.x)))
 		self.weight = 1
 
-	def __repr__(self):
-		return f'E'
 
+class Cluster:
+
+	def __init__(self, node):
+		self.members = set([node])
+		self.remaining = node.remaining
+
+	def __contains__(self, x):
+		return x in self.members
+
+	def consume(self, other):
+		assert(other is not self)
+		for node in other.members:
+			self.members.add(node)
+			self.remaining += node.remaining
+			node.cluster = self
+		del other
+
+
+def solve(board):
+	while simple_solver_iteration(board):
+		pass
+	if board.is_solved():
+		return True
+	# return exploratory_solver(board)
+
+def simple_solver_iteration(board):
+	new_bridge = False
+	for y, x, node in board.get_unfinished_nodes():
+		possible_ds = []
+		total_slots = 0
+
+		for d in DIRECTIONS:
+			neighbour = board.get_node_in_direction(y, x, d)
+			if neighbour is None:
+				continue
+			possible_ds.append(d)
+			node.slots[d] = min(node.slots[d], neighbour.slots[neg(d)])
+			total_slots += node.slots[d]
+
+		for d in possible_ds:
+			if total_slots - node.slots[d] < node.remaining:
+				board.create_bridge(y, x, d)
+				new_bridge = True
+	return new_bridge
+
+def exploratory_solver(board):
+	for y, x, node in board.get_unfinished_nodes():
+		for d in DIRECTIONS:
+			neighbour = board.get_node_in_direction(y, x, d)
+			if neighbour is None:
+				continue
+			if node.slots[d] and neighbour.slots[neg(d)]:
+				board.create_bridge(y, x, d)
+				return
 
 # create_number_references([
 # 	("10x7_2400-1080.npy", 10, 7),
@@ -318,7 +374,9 @@ class Bridge:
 board_pixels = get_board_image("10x7_2400-1080.npy")
 cv2.imshow("original", cv2.resize(board_pixels, (540, 700)))
 board = digitise(board_pixels, rows=10, columns=7)
-board.solve()
+solve(board)
+for c in board.clusters:
+	print(c.members, c.remaining)
 board.draw()
 
 
