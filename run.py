@@ -44,12 +44,6 @@ def get_board_image(screenshot_file=None):
 
 	return board
 
-def show(image):
-	image = cv2.resize(image, (540, 700))
-	cv2.imshow("window", image)
-	cv2.waitKey(0)
-	cv2.destroyWindow("window")
-
 
 def image_to_patches(board, rows, columns):
 	border = 13
@@ -241,8 +235,16 @@ class Board:
 	def is_solved(self):
 		return len(self.clusters) == 1 and next(iter(self.clusters)).remaining == 0
 
-	def copy():
-		pass
+	def copy(self):
+		copy_dict = {}
+
+		board = Board.__new__(Board)
+		board.height = self.height
+		board.width = self.width
+		board.grid = [[item.copy(copy_dict) for item in row] for row in self.grid]
+		board.clusters = set([c.copy(copy_dict) for c in self.clusters])
+
+		return board
 
 	def draw(self):
 		rad = 40
@@ -276,19 +278,41 @@ class Board:
 		cv2.waitKey(0)
 
 
-class Space:
+class Copyable:
+	def copy(self, copy_dict):
+		if self in copy_dict:
+			return copy_dict[self]
+		copy = type(self).__new__(type(self))
+		copy_dict[self] = copy
+		self._populate_copy(copy, copy_dict)
+		return copy
+
+	def _copy(self, copy_dict):
+		raise NotImplementedError
+
+
+class Space(Copyable):
 
 	def __repr__(self):
 		return '0'
 
+	def _populate_copy(self, copy, copy_dict):
+		pass
 
-class Node:
+
+class Node(Copyable):
 
 	def __init__(self, clue):
 		self.clue = clue
 		self.remaining = clue
 		self.slots = dict((k, min(2, clue)) for k in DIRECTIONS)
 		self.cluster = Cluster(self)
+
+	def _populate_copy(self, copy, copy_dict):
+		copy.clue = self.clue
+		copy.remaining = self.remaining
+		copy.slots = dict(self.slots)
+		copy.cluster = self.cluster.copy(copy_dict)
 
 	def __repr__(self):
 		return f'{self.clue}'
@@ -302,18 +326,26 @@ class Node:
 			self.slots[_d] = min(self.slots[_d], self.remaining)
 
 
-class Bridge:
+class Bridge(Copyable):
 
 	def __init__(self, d):
 		self.d = Direction(int(bool(d.y)), int(bool(d.x)))
 		self.weight = 1
 
+	def _populate_copy(self, copy, copy_dict):
+		copy.d = self.d
+		copy.weight = self.weight
 
-class Cluster:
+
+class Cluster(Copyable):
 
 	def __init__(self, node):
 		self.members = set([node])
 		self.remaining = node.remaining
+
+	def _populate_copy(self, copy, copy_dict):
+		copy.members = set([node.copy(copy_dict) for node in self.members])
+		copy.remaining = self.remaining
 
 	def __contains__(self, x):
 		return x in self.members
@@ -327,12 +359,14 @@ class Cluster:
 		del other
 
 
+
 def solve(board):
 	while simple_solver_iteration(board):
 		pass
 	if board.is_solved():
-		return True
-	# return exploratory_solver(board)
+		return board
+	# return board
+	return exploratory_solver(board)
 
 def simple_solver_iteration(board):
 	new_bridge = False
@@ -361,8 +395,15 @@ def exploratory_solver(board):
 			if neighbour is None:
 				continue
 			if node.slots[d] and neighbour.slots[neg(d)]:
-				board.create_bridge(y, x, d)
-				return
+				copy = board.copy()
+				copy.create_bridge(y, x, d)
+				try:
+					copy = solve(copy)
+					return copy
+				except Contradiction:
+					pass
+
+	raise Contradiction()
 
 # create_number_references([
 # 	("10x7_2400-1080.npy", 10, 7),
@@ -371,10 +412,9 @@ def exploratory_solver(board):
 # 	("14x10_2400-1080.npy", 14, 10),
 # ])
 
-board_pixels = get_board_image("10x7_2400-1080.npy")
-cv2.imshow("original", cv2.resize(board_pixels, (540, 700)))
-board = digitise(board_pixels, rows=10, columns=7)
-solve(board)
+board_pixels = get_board_image("14x10_2400-1080.npy")
+board = digitise(board_pixels, rows=14, columns=10)
+board = solve(board)
 for c in board.clusters:
 	print(c.members, c.remaining)
 board.draw()
