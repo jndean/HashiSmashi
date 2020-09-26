@@ -5,8 +5,10 @@ import cv2
 import numpy as np
 
 
-Direction = namedtuple("Direction", ["y", "x"])
+adb = "./platform-tools/adb"
 
+
+Direction = namedtuple("Direction", ["y", "x"])
 DIRECTIONS = (Direction(-1, 0), Direction(0, -1), Direction(1, 0), Direction(0, 1))
 
 def neg(direction):
@@ -16,10 +18,8 @@ def orthogonal(d1, d2):
 	return not (d1.y * d2.y + d1.x * d2.x)
 
 
-
 def get_board_image(screenshot_file=None):
 	if screenshot_file is None:
-		adb = "./platform-tools/adb"
 		pipe = subprocess.Popen(
 			f"{adb} shell screencap -p",
        		stdin=subprocess.PIPE,
@@ -31,33 +31,33 @@ def get_board_image(screenshot_file=None):
 		image = np.fromfile(screenshot_file, dtype=np.uint8
 			).reshape((2400,1080))
 
+	return image
+
+
+def image_to_patches(image, rows, columns):
+
+	# Crop the board, trim some padding and normalise the values
+	trim = 13
 	borders = np.nonzero(255 == image[:, image.shape[1] // 2])[0]
-	top, bottom = borders[0], borders[-1]
-
+	top, bottom = borders[0] + trim, borders[-1] - trim
 	borders = np.nonzero(255 == image[(top + bottom) // 2, :])[0]
-	left, right = borders[0], borders[-1]
 
-	board = image[top:bottom, left:right]
+	left, right = borders[0] + trim, borders[-1] - trim
+	image = image[top:bottom, left:right]
+	image -= np.min(image)
+	image = image / np.max(image)
 
-	board -= np.min(board)
-	board = board / np.max(board)
+	h = image.shape[0] / rows
+	w = image.shape[1] / columns
 
-	return board
-
-
-def image_to_patches(board, rows, columns):
-	border = 13
-	board = board[border:-border, border:-border]
-	h = board.shape[0] / rows
-	w = board.shape[1] / columns
-
+	# Crop out and trim each grid cell
 	out = []
 	for y_i in range(0, rows):
 		row = []
 		for x_i in range(0, columns):
 			y1, y2 = int(y_i * h), int((y_i + 1) * h)
 			x1, x2 = int(x_i * w), int((x_i + 1) * w)
-			patch = board[y1:y2, x1:x2]
+			patch = image[y1:y2, x1:x2]
 			while patch.size and np.all(patch[0] == 1):
 				patch = patch[1:]
 			while patch.size and np.all(patch[-1] == 1):
@@ -73,7 +73,7 @@ def image_to_patches(board, rows, columns):
 			row.append(patch)
 		out.append(row)
 
-	return out
+	return out, top, left, h, w
 
 
 def create_number_references(file_descs):
@@ -82,7 +82,7 @@ def create_number_references(file_descs):
 
 	for (filename, n_rows, n_columns) in file_descs:
 		image = get_board_image(filename)
-		patches = image_to_patches(image, n_rows, n_columns)
+		patches, *_ = image_to_patches(image, n_rows, n_columns)
 		for row in patches:
 			for patch in row:
 				if patch is None:
@@ -128,38 +128,35 @@ def ocr(patch):
 	return val
 
 
-def digitise(image, rows, columns):
-	grid = image_to_patches(image, rows, columns)
-	for y in range(len(grid)):
-		for x in range(len(grid[0])):
-			grid[y][x] = ocr(grid[y][x])
-	board = Board(grid)
-	return board
-
-
 class Contradiction(RuntimeError):
 	pass
 
 
 class Board:
-	def __init__(self, values):
-		self.height = len(values)
-		self.width = len(values[0])
-		self._build(values)
+	def __init__(self, image, rows, columns):
+		self._build(image, rows, columns)
 
-	def _build(self, values):
+	def _build(self, image, rows, columns):
+		patches, top, left, h, w = image_to_patches(image, rows, columns)
+
 		self.grid = []
 		self.clusters = set()
-		for y, row in enumerate(values):
-			out = []
-			for x, value in enumerate(row):
+		self.bridge_list = []
+		self.height = len(patches)
+		self.width = len(patches[0])
+		self.board_top, self.board_left = top, left
+		self.cell_h, self.cell_w = h, w
+
+		for y in range(len(patches)):
+			self.grid.append([])
+			for x in range(len(patches[0])):
+				value = ocr(patches[y][x])
 				if value is None:
-					out.append(Space())
+					self.grid[-1].append(Space())
 				else:
 					node = Node(value)
 					self.clusters.add(node.cluster)
-					out.append(node)
-			self.grid.append(out)
+					self.grid[-1].append(node)
 		
 	def get_unfinished_nodes(self):
 		for y, row in enumerate(self.grid):
@@ -183,6 +180,8 @@ class Board:
 			return square
 
 	def create_bridge(self, y, x, d):
+		self.bridge_list.append((y, x, d))
+
 		node = self.grid[y][x]
 
 		# Find the other node
@@ -220,14 +219,16 @@ class Board:
 
 		# Check for contradictions
 		d_sum, other_d_sum = 0, 0
-		for d in DIRECTIONS:
-			d_sum += node.slots[d]
-			other_d_sum += other_node.slots[d]
+		for _d in DIRECTIONS:
+			d_sum += node.slots[_d]
+			other_d_sum += other_node.slots[_d]
+
 		if (d_sum < node.remaining or 
 			other_d_sum < other_node.remaining or
 			(node.cluster.remaining == 0 and len(self.clusters) > 1)
 		):
 			raise Contradiction()
+
 
 	def __contains__(self, point):
 		return 0 <= point[0] < self.height and 0 <= point[1] < self.width
@@ -243,6 +244,9 @@ class Board:
 		board.width = self.width
 		board.grid = [[item.copy(copy_dict) for item in row] for row in self.grid]
 		board.clusters = set([c.copy(copy_dict) for c in self.clusters])
+		board.bridge_list = list(self.bridge_list)
+		board.board_top, board.board_left = self.board_top, self.board_left
+		board.cell_h, board.cell_w = self.cell_h, self.cell_w
 
 		return board
 
@@ -275,7 +279,6 @@ class Board:
 					canvas = cv2.line(canvas, start, end, 0, 2)
 
 		cv2.imshow("board", canvas)
-		cv2.waitKey(0)
 
 
 class Copyable:
@@ -318,12 +321,36 @@ class Node(Copyable):
 		return f'{self.clue}'
 
 	def connect(self, d):
+		if not (self.remaining and self.slots[d]):
+			raise Contradiction()
 		assert(self.remaining and self.slots[d])
 		self.slots[d] -= 1
 		self.remaining -= 1
 		self.cluster.remaining -= 1
 		for _d in DIRECTIONS:
 			self.slots[_d] = min(self.slots[_d], self.remaining)
+
+	def connect_to(self, other, d):
+		assert(
+			self.remaining and self.slots[d] and
+			other.remaining and other.slots[d]
+		)
+		neg_d = neg(d)
+
+		self.slots[d] -= 1
+		other.slots[neg_d] -= 1
+		self.remaining -= 1
+		other.remaining -= 1
+		self.cluster.remaining -= 1
+		other.cluster.remaining -= 1
+
+		self.slots[d] = min(self.slots[d], self.remaining, other.slots[neg_d], other.remaining)
+		other.slots[neg_d] = self.slots[d]
+
+		for _d in DIRECTIONS:
+			neg__d = neg(_d)
+			self.slots[_d] = min(self.slots[_d], self.remaining)        
+			other.slots[neg__d] = min(other.slots[neg__d], other.remaining)
 
 
 class Bridge(Copyable):
@@ -365,7 +392,6 @@ def solve(board):
 		pass
 	if board.is_solved():
 		return board
-	# return board
 	return exploratory_solver(board)
 
 def simple_solver_iteration(board):
@@ -377,6 +403,7 @@ def simple_solver_iteration(board):
 		for d in DIRECTIONS:
 			neighbour = board.get_node_in_direction(y, x, d)
 			if neighbour is None:
+				node.slots[d] = 0
 				continue
 			possible_ds.append(d)
 			node.slots[d] = min(node.slots[d], neighbour.slots[neg(d)])
@@ -405,18 +432,39 @@ def exploratory_solver(board):
 
 	raise Contradiction()
 
-# create_number_references([
-# 	("10x7_2400-1080.npy", 10, 7),
-# 	("10x7_2_2400-1080.npy", 10, 7),
-# 	("13x9_2400-1080.npy", 13, 9),
-# 	("14x10_2400-1080.npy", 14, 10),
-# ])
 
-board_pixels = get_board_image("14x10_2400-1080.npy")
-board = digitise(board_pixels, rows=14, columns=10)
-board = solve(board)
-for c in board.clusters:
-	print(c.members, c.remaining)
-board.draw()
+def send_solution_to_device(board):
+	swipe_length = 50  # pixels
+	swipe_time = str(30)  # ms
+	instructions = []
+	for y, x, d in board.bridge_list:
+		y1 = int((y + 0.5) * board.cell_h + board.board_top)
+		x1 = int((x + 0.5) * board.cell_w + board.board_left)
+		y2 = y1 + swipe_length * d.y
+		x2 = x1 + swipe_length * d.x
+		instructions.append(f"input swipe {x1} {y1} {x2} {y2} {swipe_time}")
 
+	cmd = [adb, "shell", "; ".join(instructions)] 
+	subprocess.run(cmd, check=True)
+
+
+
+if __name__ == "__main__":
+
+	# create_number_references([
+	# 	("10x7_2400-1080.npy", 10, 7),
+	# 	("10x7_2_2400-1080.npy", 10, 7),
+	# 	("13x9_2400-1080.npy", 13, 9),
+	# 	("14x10_2400-1080.npy", 14, 10),
+	# ])
+
+	board_pixels = get_board_image()  # "13x9_2400-1080.npy")
+	board = Board(board_pixels, rows=13, columns=9)
+	board = solve(board)
+	board.draw()
+	cv2.waitKey(1)
+	send_solution_to_device(board)
+	cv2.waitKey(0)
+
+	# subprocess.run([adb, "shell", "input", "swipe", "500", "950", "500", "1000", "30"], shell=True) 
 
