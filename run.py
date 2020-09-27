@@ -34,9 +34,7 @@ def get_board_image(screenshot_file=None):
 	return image
 
 
-def image_to_patches(image, rows, columns):
-
-	# Crop the board, trim some padding and normalise the values
+def trim_board_image(image):
 	trim = 13
 	borders = np.nonzero(255 == image[:, image.shape[1] // 2])[0]
 	top, bottom = borders[0] + trim, borders[-1] - trim
@@ -47,8 +45,27 @@ def image_to_patches(image, rows, columns):
 	image -= np.min(image)
 	image = image / np.max(image)
 
-	h = image.shape[0] / rows
-	w = image.shape[1] / columns
+	return image, top, left
+
+
+def determine_grid_shape(image):
+	for rows, columns in ((14, 10), (13, 9), (11, 8), (10, 7)):
+		h = image.shape[0] / rows
+		w = image.shape[1] / columns
+
+		if not all(np.all(image[int(y_i * h), :] == 1) for y_i in range(1, rows)):
+			continue
+		if not all(np.all(image[:, int(x_i * w)] == 1) for x_i in range(1, columns)):
+			continue
+		return rows, columns, h, w
+
+	raise ValueError("Couldn't determine grid shape")
+
+
+
+def image_to_patches(image):
+	image, top, left = trim_board_image(image)
+	rows, columns, h, w = determine_grid_shape(image)
 
 	# Crop out and trim each grid cell
 	out = []
@@ -133,11 +150,11 @@ class Contradiction(RuntimeError):
 
 
 class Board:
-	def __init__(self, image, rows, columns):
-		self._build(image, rows, columns)
+	def __init__(self, image):
+		self._build(image)
 
-	def _build(self, image, rows, columns):
-		patches, top, left, h, w = image_to_patches(image, rows, columns)
+	def _build(self, image):
+		patches, top, left, h, w = image_to_patches(image)
 
 		self.grid = []
 		self.clusters = set()
@@ -464,7 +481,7 @@ if __name__ == "__main__":
 	# ])
 
 	board_pixels = get_board_image()
-	board = Board(board_pixels, rows=14, columns=10)
+	board = Board(board_pixels)
 	board = solve(board)
 	board.draw()
 	cv2.waitKey(1)
