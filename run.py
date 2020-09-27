@@ -188,8 +188,7 @@ class Board:
 		while 1:
 			y += d.y
 			x += d.x
-			if (y, x) not in self:
-				return
+			assert((y, x) in self)
 			square = self.grid[y][x]
 
 			if isinstance(square, Bridge):
@@ -250,7 +249,7 @@ class Board:
 
 		return board
 
-	def draw(self):
+	def draw(self, debug=False):
 		rad = 40
 		h, w = rad * self.height, rad * self.width
 		canvas = np.ones((h, w), dtype=np.uint8) * 255
@@ -264,9 +263,15 @@ class Board:
 
 				if isinstance(item, Space):
 					continue
+
 				elif isinstance(item, Node):
 					canvas = cv2.circle(canvas, (x, y), int(rad / 2.2), 0, 2)
 					canvas = cv2.putText(canvas, str(item), (x-10, y+10), font, 1, 0, 2)
+					if debug:
+						for d in DIRECTIONS:
+							_x = int(x - 6 + d.x * rad * 0.7)
+							_y = int(y + 3 + d.y * rad * 0.7)
+							canvas = cv2.putText(canvas, str(item.slots[d]), (_x, _y), font, .5, 128, 2)
 					continue
 
 				# Otherwise, Bridge
@@ -321,8 +326,6 @@ class Node(Copyable):
 		return f'{self.clue}'
 
 	def connect(self, d):
-		if not (self.remaining and self.slots[d]):
-			raise Contradiction()
 		assert(self.remaining and self.slots[d])
 		self.slots[d] -= 1
 		self.remaining -= 1
@@ -405,8 +408,10 @@ def simple_solver_iteration(board):
 			if neighbour is None:
 				node.slots[d] = 0
 				continue
-			possible_ds.append(d)
 			node.slots[d] = min(node.slots[d], neighbour.slots[neg(d)])
+			if node.slots[d] == 0:
+				continue
+			possible_ds.append(d)
 			total_slots += node.slots[d]
 
 		for d in possible_ds:
@@ -423,8 +428,8 @@ def exploratory_solver(board):
 				continue
 			if node.slots[d] and neighbour.slots[neg(d)]:
 				copy = board.copy()
-				copy.create_bridge(y, x, d)
 				try:
+					copy.create_bridge(y, x, d)
 					copy = solve(copy)
 					return copy
 				except Contradiction:
@@ -434,8 +439,8 @@ def exploratory_solver(board):
 
 
 def send_solution_to_device(board):
-	swipe_length = 50  # pixels
-	swipe_time = str(30)  # ms
+	swipe_length = int(max(board.cell_h, board.cell_w))
+	swipe_time = 30  # ms
 	instructions = []
 	for y, x, d in board.bridge_list:
 		y1 = int((y + 0.5) * board.cell_h + board.board_top)
@@ -458,13 +463,10 @@ if __name__ == "__main__":
 	# 	("14x10_2400-1080.npy", 14, 10),
 	# ])
 
-	board_pixels = get_board_image()  # "13x9_2400-1080.npy")
-	board = Board(board_pixels, rows=13, columns=9)
+	board_pixels = get_board_image()
+	board = Board(board_pixels, rows=14, columns=10)
 	board = solve(board)
 	board.draw()
 	cv2.waitKey(1)
 	send_solution_to_device(board)
 	cv2.waitKey(0)
-
-	# subprocess.run([adb, "shell", "input", "swipe", "500", "950", "500", "1000", "30"], shell=True) 
-
